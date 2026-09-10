@@ -42,7 +42,7 @@ VOICEVOX(`127.0.0.1:50021`)だけで、例外は`weather_report.sh`を使った�
 ## セットアップ
 
 ```bash
-git clone <このリポジトリのURL> zundamon-mascot
+git clone https://github.com/Hexagon0423/zundamon-mascot-public.git zundamon-mascot
 cd zundamon-mascot
 pip install -e ".[dev]"
 
