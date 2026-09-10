@@ -64,6 +64,7 @@ class Speaker(QObject):
         self._frame_timer.setInterval(FRAME_INTERVAL_MS)
         self._frame_timer.timeout.connect(self._on_tick)
         self._speaking = False
+        self._pending_expression = None
 
         self._speech_queue.new_item.connect(self._maybe_start_next)
         self._synthesis_finished.connect(self._on_synthesis_finished)
@@ -78,8 +79,12 @@ class Speaker(QObject):
 
     def _start_utterance(self, request) -> None:
         text = request.text
-        if request.expression is not None:
-            self._window.apply_expression(request.expression)
+        # Held until the audio is ready rather than applied now: the window
+        # lets an expression go a short while after the mouth stops moving, and
+        # synthesis can outlast that, so applying it up front made the mascot
+        # strike the pose, drop out of it, and only then start talking
+        # (2026-09-11).
+        self._pending_expression = request.expression
         # Claimed before the worker starts, so a second request arriving mid
         # synthesis waits in the queue instead of starting a parallel one.
         self._speaking = True
@@ -103,6 +108,7 @@ class Speaker(QObject):
     def _on_synthesis_finished(self, query, wav_bytes, error) -> None:
         if error is not None:
             self._speaking = False
+            self._pending_expression = None
             self.speech_failed.emit(f"音声合成に失敗したのだ: {error}")
             self._maybe_start_next()
             return
@@ -112,6 +118,9 @@ class Speaker(QObject):
         post_phoneme = query.get("postPhonemeLength", 0.0) / (query.get("speedScale", 1.0) or 1.0)
         self._end_time = (self._timeline[-1].end if self._timeline else 0.0) + post_phoneme
 
+        if self._pending_expression is not None:
+            self._window.apply_expression(self._pending_expression)
+            self._pending_expression = None
         play_wav_async(wav_bytes)
         self._elapsed.start()
         self._frame_timer.start()

@@ -115,3 +115,32 @@ def test_a_failure_frees_the_speaker_for_the_next_utterance(app, monkeypatch):
 
     assert failures, "失敗が通知されなかったのだ"
     assert speaker._speaking is False
+
+
+def test_the_expression_waits_for_the_audio(app, monkeypatch):
+    """Applying it up front let the window's idle release fire first.
+
+    Synthesis can outlast the hold, so the mascot struck the pose, dropped out
+    of it, and only then started talking (2026-09-11, reported).
+    """
+    window = FakeWindow()
+    voicevox = SlowVoicevox(delay=0.25)
+    monkeypatch.setattr("mascot.speaker.play_wav_async", lambda data: None)
+    queue = SpeechQueue()
+    # Kept alive deliberately: the queued signal is dropped if the Speaker
+    # is collected while the worker thread is still running.
+    speaker = Speaker(window, queue, voicevox, Config())
+    assert speaker is not None
+    queue.push("こんにちはなのだ", expression="happy")
+
+    deadline = time.monotonic() + 0.15
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert window.expressions == [], "合成中にもう表情が出てるのだ"
+
+    deadline = time.monotonic() + 5.0
+    while not window.expressions and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert window.expressions == ["happy"]
