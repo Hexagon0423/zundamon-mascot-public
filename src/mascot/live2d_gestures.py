@@ -97,21 +97,21 @@ GESTURE_LABELS: dict[str, str] = {
 # Written as a timetable rather than as per-gesture hour ranges because that is
 # how it gets reviewed -- the question asked of it is always "what happens at
 # 3pm", never "when does the yawn happen". Sleepiness is the spine of it: the
-# yawn belongs to the morning, the doze to the night and the after-lunch dip,
-# and neither should turn up at 11am (2026-09-10, set by the user after
-# watching them).
+# night and the early morning get only the sleepy pair, the working day only
+# the alert ones, and a yawn at 11am would read as a bug where the same yawn at
+# 8am reads as character (2026-09-11, set by the user after watching them).
 #
 # A gesture defined here but absent from every band still works from the
 # right-click 仕草 menu; it just never fires on its own.
 IDLE_SCHEDULE: tuple[tuple[int, int, tuple[str, ...]], ...] = (
-    # Nothing but dozing at night: awake-looking movement at 3am reads as the
-    # mascot being livelier than the person watching it.
-    (0, 7, ("doze",)),
+    # Only sleepy movement at night: looking alert at 3am reads as the mascot
+    # being livelier than the person watching it.
+    (0, 7, ("doze", "yawn")),
     (7, 10, ("yawn", "glance_around")),
     (10, 13, ("glance_around", "tilt_head", "deep_breath", "shrug")),
-    (13, 15, ("doze", "glance_around", "tilt_head", "deep_breath")),
+    (13, 15, ("glance_around", "tilt_head", "deep_breath")),
     (15, 22, ("glance_around", "tilt_head", "deep_breath")),
-    (22, 24, ("doze",)),
+    (22, 24, ("doze", "yawn")),
 )
 
 

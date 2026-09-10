@@ -58,19 +58,21 @@ def test_scheduled_gestures_are_all_defined():
     assert not unknown, f"中身の無い仕草があるのだ: {sorted(unknown)}"
 
 
-def test_sleepy_gestures_keep_to_their_hours():
-    """The yawn is the morning one and the doze the night one; neither should
+def test_sleepy_gestures_keep_to_the_sleepy_hours():
+    """Yawning and dozing belong to the night and the morning; neither should
     show up in the middle of the working day."""
+    for hour in (0, 3, 6, 22, 23):
+        assert "doze" in available_at(hour), hour
+        assert "yawn" in available_at(hour), hour
     assert "yawn" in available_at(8)
-    assert "doze" in available_at(3)
-    assert "doze" in available_at(14)
-    assert "doze" in available_at(23)
-    for hour in (10, 11, 12, 16, 20):
+    for hour in (10, 11, 12, 14, 16, 20):
         assert "yawn" not in available_at(hour), hour
         assert "doze" not in available_at(hour), hour
 
 
-def test_the_yawn_and_the_doze_never_share_an_hour():
-    for hour in range(24):
+def test_the_working_day_is_awake_throughout():
+    """10:00-22:00 is the stretch someone is most likely to be watching."""
+    for hour in range(10, 22):
         allowed = available_at(hour)
-        assert not ("yawn" in allowed and "doze" in allowed), hour
+        assert allowed, hour
+        assert set(allowed) <= {"glance_around", "tilt_head", "deep_breath", "shrug"}, hour
