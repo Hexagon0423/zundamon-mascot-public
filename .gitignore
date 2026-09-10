@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+config.json
+mascot.log
+logs/
+# scripts/verify_live2d_expressions.py の出力(見た目確認用、再生成できる)
+live2d_expression_shots/
+# 立ち絵・Live2Dモデルなどの素材(README参照、各自入手のためこのリポジトリには入れない)
+assets/
