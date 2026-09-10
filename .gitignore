@@ -10,3 +10,5 @@ logs/
 live2d_expression_shots/
 # 立ち絵・Live2Dモデルなどの素材(README参照、各自入手のためこのリポジトリには入れない)
 assets/
+# 各自の場所(weather_report.sh用)。example版からコピーして書き換える
+scripts/examples/weather_location.sh

@@ -14,12 +14,29 @@
 (理由は下記「素材について」を参照)。素材が無くても、後述の仮素材生成スクリプトで
 最小限の見た目のまま全部の機能を試せる。
 
-## 必要環境
+## 用意しておくもの
 
-- Python 3.10+
-- Windows(常時最前面・透過ウィンドウ・クリック透過などWin32寄りの実装のため、動作確認はWindowsのみ)
-- [VOICEVOX](https://voicevox.hiroshiba.jp/)(ローカルで起動しているだけでよい。デフォルトは`http://127.0.0.1:50021`)
-- Live2Dバックエンドを使うなら `live2d-py`(`pip install -e ".[dev]"` で一緒に入る)
+### 必須
+
+| もの | 用途 |
+|---|---|
+| Windows | 常時最前面・透過ウィンドウ・クリック透過などWin32寄りの実装のため、動作確認はWindowsのみ |
+| Python 3.10+ | マスコット本体 |
+| **[VOICEVOX](https://voicevox.hiroshiba.jp/)** | 音声合成。**インストールして、ローカルで起動しておくこと**(既定は`http://127.0.0.1:50021`。マスコットが自動では起動しない) |
+
+VOICEVOXを入れ忘れたままマスコットを起動すると、見た目は動くのに何度喋らせても無音になる
+(エラーも出にくい)。喋らない時はまずVOICEVOXが起動しているか確認すること。
+
+### 任意(お好みで)
+
+| もの | 用途 |
+|---|---|
+| 立ち絵PNG または Live2Dモデル | 無くても仮素材(緑の丸っこいプレースホルダー)で全機能を試せる。用意する場合は下記「素材について」参照 |
+| Claude Code、その他好きな自動化ツール | マスコットは`POST /speak`というHTTP APIしか要求しないので、これを叩ける物なら何でも連携できる。**必須ではない** |
+| `claude` CLI | `scripts/examples/weather_report.sh`が天気の文言をずんだもん口調に整形するのに使う(無くても固定文言にフォールバックするので無くても動く) |
+
+**Notionは使わない。** 個人用の別プロジェクトでは日次ログをNotionに書く自動化があったが、
+配布版であるこのリポジトリからは意図的に除外している。受け取った側に何かログが残ることはない。
 
 ## セットアップ
 
@@ -78,10 +95,39 @@ docstringと、`scripts/generate_placeholder_assets.py`が生成する仮素材�
 [Live2D公式サンプルデータ配布ページ](https://www.live2d.com/learn/sample/zundamon/)から、
 `無償提供マテリアルの使用許諾契約書`への同意の上で入手できる。
 
-## Claude Codeなど外部ツールとの連携
+## 外部ツールとの連携(Claude Codeなど)
 
 マスコットは`POST /speak`というシンプルなHTTP APIしか要求しない。Claude CodeのHookや、
 その他好きな自動化ツールから、上のcurl例と同じ形でリクエストを送ればよい。
+
+## 定期的に喋らせるサンプル(任意)
+
+`scripts/examples/` に、マスコットのHTTP APIを直接叩くだけの独立したスクリプトを2つ用意した
+(どちらもClaude Code等には依存しない)。
+
+```bash
+bash scripts/examples/hourly_chime.sh          # 今の時刻を読み上げる(時報)
+
+cp scripts/examples/weather_location.example.sh scripts/examples/weather_location.sh
+# weather_location.sh を自分の場所(PLACE_NAME/LAT/LON)に書き換える
+
+bash scripts/examples/weather_report.sh now    # 今の天気
+bash scripts/examples/weather_report.sh today  # 今日の予報
+bash scripts/examples/weather_report.sh tomorrow  # 明日の予報
+```
+
+`weather_location.sh`は`.gitignore`対象なので、書き換えても自分のリポジトリにコミットされない。
+
+毎時・毎朝など定期実行したい場合は、Windowsのタスクスケジューラに登録する
+(PowerShellの例):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\Program Files\Git\bin\bash.exe" `
+    -Argument '"<リポジトリのパス>\scripts\examples\hourly_chime.sh"'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
+    -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration ([TimeSpan]::MaxValue)
+Register-ScheduledTask -TaskName "ZundamonHourlyChime" -Action $action -Trigger $trigger
+```
 
 ## テスト
 
