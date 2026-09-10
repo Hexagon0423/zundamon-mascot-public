@@ -47,6 +47,8 @@ class Config:
     voice: VoiceParams = field(default_factory=VoiceParams)
     window_position: WindowPosition | None = None
     click_through: bool = False
+    # Whether clicking the mascot makes it say something (Live2D backend only).
+    click_reaction: bool = True
     asset_set: str = DEFAULT_ASSET_SET
     scale: float = 1.0
 
@@ -70,6 +72,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             voice=VoiceParams(**voice_data) if voice_data else VoiceParams(),
             window_position=WindowPosition(**pos_data) if pos_data else None,
             click_through=data.get("click_through", False),
+            click_reaction=data.get("click_reaction", True),
             asset_set=data.get("asset_set", DEFAULT_ASSET_SET),
             scale=data.get("scale", 1.0),
         )

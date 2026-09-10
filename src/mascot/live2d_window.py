@@ -17,13 +17,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QSurfaceFormat
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QMenu
 
 import live2d.v3 as live2d
 
+from mascot import click_through
 from mascot.config import Config, WindowPosition, save_config
 from mascot.geometry import clamp_onto_screen
 from mascot.lipsync import SILENT_VOWEL
@@ -85,12 +86,26 @@ LIPSYNC_PARAMS = ("ParamMouthOpenY", "ParamMouthForm")
 # what StartMotion takes (see live2d_motions.py).
 MOTION_GROUP = ""
 
+# How often the cursor is tested against the model to decide whether this
+# window should be catching clicks at all. The window is a rectangle around a
+# mostly-transparent drawing, so without this it swallows clicks over roughly
+# twice the area the mascot actually occupies (2026-09-11, reported).
+HIT_TEST_INTERVAL_MS = 80
+
+# A press and release within this many pixels is a click; more than that was a
+# drag, and dragging the mascot around shouldn't set it talking.
+CLICK_SLOP_PX = 4
+
 SCALE_PRESETS = (0.25, 0.375, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 DEFAULT_WINDOW_SIZE = (400, 500)
 
 
 class Live2DWindow(QOpenGLWidget):
+    # Emitted when the mascot itself is clicked (not dragged, not the
+    # transparent margin around it). app.py turns this into a spoken reaction.
+    clicked = Signal()
+
     def __init__(self, model_path: str, config: Config, config_path=None):
         super().__init__()
         self._model_path = model_path
@@ -122,6 +137,10 @@ class Live2DWindow(QOpenGLWidget):
         # Parameter id -> index, so the reset fade can leave alone whatever
         # lipsync and gestures are driving this frame.
         self._param_index: dict[str, int] = {}
+        # Where the left button went down, to tell a click from a drag.
+        self._press_at = QPoint()
+        # Last value pushed to the OS, so the style is only poked on a change.
+        self._click_through_state: bool | None = None
 
         screen = QGuiApplication.primaryScreen()
         self._raw_device_pixel_ratio = screen.devicePixelRatio() if screen else 1.0
@@ -130,6 +149,8 @@ class Live2DWindow(QOpenGLWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, config.click_through)
+        # The native style needs a window handle, so it is applied from
+        # showEvent once there is one.
 
         fmt = QSurfaceFormat()
         fmt.setAlphaBufferSize(8)
@@ -138,6 +159,10 @@ class Live2DWindow(QOpenGLWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         self._timer.start(FRAME_INTERVAL_MS)
+
+        self._hit_timer = QTimer(self)
+        self._hit_timer.timeout.connect(self._follow_cursor)
+        self._hit_timer.start(HIT_TEST_INTERVAL_MS)
 
         self._restore_position()
 
@@ -291,6 +316,40 @@ class Live2DWindow(QOpenGLWidget):
             return
         if self._model.IsMotionFinished():
             self._motion_active = False
+
+    # -- click ----------------------------------------------------------------
+
+    def _follow_cursor(self) -> None:
+        """Catch clicks only where the mascot is actually drawn.
+
+        Qt can only make the whole widget transparent to the mouse, so the
+        transparency is toggled as the cursor moves: over the drawing the
+        window takes clicks, over the empty margin it lets them through to
+        whatever is behind. Polled rather than event-driven precisely because
+        a widget that isn't receiving mouse events can't tell us the cursor
+        has arrived.
+        """
+        if self._model is None or self._drag_offset is not None:
+            return
+        if self._config.click_through:
+            self._set_click_through(True)
+            return
+        local = self.mapFromGlobal(QCursor.pos())
+        inside = self.rect().contains(local)
+        on_model = bool(inside and self._model.HitPart(local.x(), local.y(), False))
+        self._set_click_through(not on_model)
+
+    def _set_click_through(self, transparent: bool) -> None:
+        """Both switches, because neither is enough on its own.
+
+        The Qt attribute is what the rest of Qt reads; the native extended
+        style is what actually makes Windows route the click past this window.
+        """
+        if self._click_through_state == transparent:
+            return
+        self._click_through_state = transparent
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, transparent)
+        click_through.set_click_through(int(self.winId()), transparent)
 
     # -- idle ------------------------------------------------------------------
 
@@ -450,7 +509,8 @@ class Live2DWindow(QOpenGLWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.pos()
+            self._press_at = event.globalPosition().toPoint()
+            self._drag_offset = self._press_at - self.pos()
 
     def mouseMoveEvent(self, event):
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
@@ -458,13 +518,19 @@ class Live2DWindow(QOpenGLWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_offset is not None:
+            moved = (event.globalPosition().toPoint() - self._press_at).manhattanLength()
             self._drag_offset = None
             self._save_position()
+            # Only when it's quiet: a reaction queued mid-answer would arrive
+            # after it, with nothing left to react to.
+            if moved <= CLICK_SLOP_PX and self._current_vowel == SILENT_VOWEL:
+                self.clicked.emit()
 
     # -- multi-monitor dragging -------------------------------------------------
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._set_click_through(self._config.click_through)
         handle = self.windowHandle()
         if handle is not None and not self._screen_changed_connected:
             handle.screenChanged.connect(lambda _screen: self.update())
@@ -516,7 +582,7 @@ class Live2DWindow(QOpenGLWidget):
 
     def _toggle_click_through(self) -> None:
         self._config.click_through = not self._config.click_through
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, self._config.click_through)
+        self._set_click_through(self._config.click_through)
         if self._config_path is not None:
             save_config(self._config, self._config_path)
 

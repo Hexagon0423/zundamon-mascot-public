@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from mascot.live2d_assets import (
 from mascot.live2d_window import Live2DWindow
 from mascot.server import ExclusiveHTTPServer, start_server
 from mascot.speaker import Speaker
+from mascot import reactions
 from mascot.speech_queue import SpeechQueue
 from mascot.voicevox import VoicevoxClient
 from mascot.window import MascotWindow
@@ -49,6 +51,11 @@ def setup_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"), logging.StreamHandler()],
     )
+
+
+def _react_to_click(speech_queue: SpeechQueue) -> None:
+    line, expression = reactions.pick(datetime.now().hour)
+    speech_queue.push(line, expression=expression)
 
 
 def _tray_icon_path(window: MascotWindow | Live2DWindow, config: Config) -> str | None:
@@ -173,6 +180,12 @@ def main() -> int:
     speaker.speech_failed.connect(
         lambda message: tray.showMessage("ずんだもん", message, QSystemTrayIcon.Warning, 5000)
     )
+
+    if isinstance(window, Live2DWindow) and config.click_reaction:
+        # Poking the mascot gets a line out of it, through the same queue the
+        # hook posts to -- so it waits its turn rather than talking over an
+        # answer that's already being spoken.
+        window.clicked.connect(lambda: _react_to_click(speech_queue))
 
     playback.cleanup_leftovers()
 
