@@ -33,19 +33,27 @@ EXPRESSION_PRESETS: dict[str, tuple[str, ...]] = {
     "celebrating": ("exp_02",),
     # 両手を腰に当てた立ち方の方が「どや」に見えるのでpose_Waist(両手)側。
     "proud": ("exp_smile", "pose_Waist"),
-    "relieved": ("exp_03",),
+    # 目を閉じた穏やかな顔。exp_03 も似ているが頬が赤く、ホッとしたというより
+    # 照れに見えると指摘された(2026-09-10)。
+    "relieved": ("exp_sleep",),
     "shy": ("exp_shy2",),
     "greeting": ("exp_smile", "pose_Upper2"),
     "casual": ("exp_smile", "pose_Waist2"),
-    "casual_lean": ("exp_03", "pose_Waist2"),
+    "casual_lean": ("exp_smile", "pose_Waist2"),
     "confident": ("exp_smile", "pose_cross"),
-    # exp_05 は半目(呆れ・うたがい)で、腕も一緒に指定している。
-    "skeptical": ("exp_05",),
-    "suspicious": ("exp_angry", "pose_mouth2"),
-    "serious": ("exp_angry",),
-    "angry": ("exp_angry3", "pose_Waist2"),
-    "furious": ("exp_angry3", "pose_chop"),
-    "warning_no": ("exp_angry", "pose_chop"),
+    # じと目+汗。suspicious と同じ顔だが、あちらは顎に手をやるので別物に見える。
+    "skeptical": ("exp_angry2",),
+    "suspicious": ("exp_angry2", "pose_mouth2"),
+    # exp_05 は眉が寄った真顔。exp_angry(怒り眉)を真剣に充てていたのが
+    # 「真剣ではない」と指摘された分の差し替え(2026-09-10)。
+    "serious": ("exp_05",),
+    # pose_Waist が両手を腰に当てた立ち方。pose_Waist2 は片手を胸の前に上げる形で、
+    # 怒りに使ったら「ごめん」に見えると指摘された(2026-09-10)。
+    "angry": ("exp_angry", "pose_Waist"),
+    # このモデルには怒りの段階が1つしか無く、手刀を足しても「詰め寄る」には
+    # 見えなかったので、激怒は怒りと同じ絵にしてある(2026-09-10、本人の判断)。
+    "furious": ("exp_angry", "pose_Waist"),
+    "warning_no": ("exp_angry3", "pose_chop"),
     "sad": ("exp_sad",),
     "disappointed": ("exp_sad", "pose_Middle"),
     "worried": ("exp_sad3", "pose_mouth2"),
@@ -59,8 +67,12 @@ EXPRESSION_PRESETS: dict[str, tuple[str, ...]] = {
     "confused": ("exp_surprise2", "pose_Middle"),
     "explaining": ("exp_smile", "pose_Middle2"),
     "eureka": ("exp_surprise", "pose_Upper3"),
-    "patient_wait": ("exp_sleep",),
-    "effort": ("exp_laugh2", "pose_Waist2"),
+    # relieved と同じ顔だが、腕組みが付くぶん「待っている」に寄る。
+    "patient_wait": ("exp_sleep", "pose_cross"),
+    # exp_04 は目を閉じて汗をかき、両手を腰に当てた絵(腕まで含んだ表情)。
+    # 踏ん張りにはこれが一番近い。exp_angry3(目を閉じて力む)・exp_laugh2(笑顔)・
+    # exp_angry+腕組み はいずれも踏ん張りに読めないと言われた(2026-09-10、3回)。
+    "effort": ("exp_04",),
 }
 
 EXPRESSION_LABELS: dict[str, str] = {

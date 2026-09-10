@@ -49,17 +49,21 @@ logger = logging.getLogger(__name__)
 
 FRAME_INTERVAL_MS = 33  # ~30fps, matches speaker.py's tick rate
 
-# Per-vowel mouth-open amount (0=closed, 1=fully open). Rough initial guess
-# carried over from the live2d_poc PoC -- not yet tuned against real audio.
-VOWEL_OPEN_Y: dict[str, float] = {
-    "a": 1.0,
-    "i": 0.4,
-    "u": 0.5,
-    "e": 0.6,
-    "o": 0.8,
-    "N": 0.2,
-    "cl": 0.0,
-    SILENT_VOWEL: 0.0,
+# Per-vowel mouth shape: (how far open, how wide). Open runs 0 (shut) to 1
+# (fully open); form runs -1 (pursed and small) through 0 (round) to +1 (wide
+# and flat). Read off a rendered grid of the two parameters, since neither is
+# obvious from the numbers: form is what separates い from う at the same
+# opening, and without it every vowel was the same round mouth at a different
+# height (2026-09-11 -- the first version set the opening only).
+VOWEL_MOUTH: dict[str, tuple[float, float]] = {
+    "a": (1.0, 0.3),  # 大きく開く。少しだけ横に広い
+    "i": (0.2, 1.0),  # ほとんど閉じたまま、横いっぱい
+    "u": (0.3, -1.0),  # すぼめて小さく
+    "e": (0.5, 0.6),  # 中くらい + 横広め
+    "o": (0.75, -0.4),  # 縦に開いて、やや丸め
+    "N": (0.1, 0.0),  # ん。ほぼ閉じ
+    "cl": (0.0, 0.0),  # 促音。閉じる
+    SILENT_VOWEL: (0.0, 0.0),
 }
 
 # How long the model takes to drift back to its rest pose when a motion or an
@@ -73,9 +77,9 @@ VOWEL_OPEN_Y: dict[str, float] = {
 SWITCH_FADE_SECONDS = 0.45
 RELEASE_FADE_SECONDS = 1.0
 
-# Written every frame by the lipsync path, so nothing else may replay a stale
-# value over it.
-LIPSYNC_PARAM = "ParamMouthOpenY"
+# Written every frame by the lipsync path, so nothing else may replay stale
+# values over them.
+LIPSYNC_PARAMS = ("ParamMouthOpenY", "ParamMouthForm")
 
 # This model keeps all its motions in one unnamed group; the index into it is
 # what StartMotion takes (see live2d_motions.py).
@@ -192,9 +196,12 @@ class Live2DWindow(QOpenGLWidget):
         self._note_motion_finished()
         self._tick_idle()
         gesture_values = self._tick_gesture()
-        if LIPSYNC_PARAM not in gesture_values:
-            open_y = VOWEL_OPEN_Y.get(self._current_vowel, 0.0)
-            self._model.SetParameterValue(LIPSYNC_PARAM, open_y, 1.0)
+        open_y, form = VOWEL_MOUTH.get(self._current_vowel, VOWEL_MOUTH[SILENT_VOWEL])
+        for param, value in zip(LIPSYNC_PARAMS, (open_y, form)):
+            # A gesture that shapes the mouth itself (the yawn) wins for its
+            # few seconds; it only runs when nothing is being said anyway.
+            if param not in gesture_values:
+                self._model.SetParameterValue(param, value, 1.0)
         for param, value in gesture_values.items():
             self._model.SetParameterValue(param, value, 1.0)
         self._tick_reset_fade(skip=gesture_values.keys())
@@ -212,13 +219,13 @@ class Live2DWindow(QOpenGLWidget):
         """
         if self._model is None:
             return
-        # The mouth is excluded outright rather than per-frame: lipsync owns it
-        # for the whole utterance, and an expression change lands right as
-        # speech starts.
-        mouth = self._param_index.get(LIPSYNC_PARAM)
+        # The mouth parameters are excluded outright rather than per-frame:
+        # lipsync owns them for the whole utterance, and an expression change
+        # lands right as speech starts.
+        mouth = {self._param_index[p] for p in LIPSYNC_PARAMS if p in self._param_index}
         held = []
         for index in range(self._model.GetParameterCount()):
-            if index == mouth:
+            if index in mouth:
                 continue
             parameter = self._model.GetParameter(index)
             if abs(parameter.value - parameter.default) > 1e-3:
