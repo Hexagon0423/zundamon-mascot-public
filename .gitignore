@@ -12,3 +12,7 @@ live2d_expression_shots/
 assets/
 # 各自の場所(weather_report.sh用)。example版からコピーして書き換える
 scripts/examples/weather_location.sh
+
+# 口パク用に口カーブを抜いたモーションと、それを指すモデル定義(起動時に再生成される)
+motions_lipsync_safe/
+*.lipsync_safe.model3.json

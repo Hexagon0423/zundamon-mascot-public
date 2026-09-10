@@ -12,6 +12,10 @@ differently (GL widget vs QLabel pixmap).
 from __future__ import annotations
 
 import logging
+import random
+import time
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication, QSurfaceFormat
@@ -24,6 +28,22 @@ from mascot.config import Config, WindowPosition, save_config
 from mascot.geometry import clamp_onto_screen
 from mascot.lipsync import SILENT_VOWEL
 from mascot.live2d_expressions import EXPRESSION_LABELS, EXPRESSION_PRESETS
+from mascot.live2d_gestures import (
+    GESTURE_LABELS,
+    GESTURES,
+    available_at,
+    duration,
+    sample,
+    touches_breath,
+    touches_eyes,
+)
+from mascot.live2d_motion_cache import lipsync_safe_model
+from mascot.live2d_motions import (
+    EXPRESSION_HOLD_SECONDS,
+    is_face_only,
+    motion_for,
+    next_idle_delay,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +62,25 @@ VOWEL_OPEN_Y: dict[str, float] = {
     SILENT_VOWEL: 0.0,
 }
 
+# How long the model takes to drift back to its rest pose when a motion or an
+# expression is cleared. ResetParameters() on its own is a hard cut, which read
+# as the mascot snapping between poses (2026-09-10, reported).
+#
+# Two speeds, because the two cases want opposite things: swapping to another
+# expression has to be crisp or the new gesture starts underneath the old
+# pose, while letting go at the end of a turn is the mascot relaxing and looks
+# better slow.
+SWITCH_FADE_SECONDS = 0.45
+RELEASE_FADE_SECONDS = 1.0
+
+# Written every frame by the lipsync path, so nothing else may replay a stale
+# value over it.
+LIPSYNC_PARAM = "ParamMouthOpenY"
+
+# This model keeps all its motions in one unnamed group; the index into it is
+# what StartMotion takes (see live2d_motions.py).
+MOTION_GROUP = ""
+
 SCALE_PRESETS = (0.25, 0.375, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 DEFAULT_WINDOW_SIZE = (400, 500)
@@ -57,10 +96,28 @@ class Live2DWindow(QOpenGLWidget):
         self._drag_offset: QPoint | None = None
         self._current_vowel = SILENT_VOWEL
         self._screen_changed_connected = False
+        # Set while a motion from the model is playing; idle gestures hold off
+        # until it finishes.
+        self._motion_active = False
+        # Idle handling: how long since the mascot last spoke or changed
+        # expression, so the pose can drop back to neutral and the occasional
+        # idle gesture only fires when nothing else is going on.
+        self._rng = random.Random()
+        self._current_expression = "normal"
+        self._last_activity = time.monotonic()
+        self._next_idle_at = self._last_activity + next_idle_delay(self._rng)
+        # (gesture name, started at) while a hand-authored gesture is playing.
+        self._gesture: tuple[str, float] | None = None
+        # (started at, fade length, [(param index, value it had, its default)])
+        # while easing back to rest.
+        self._reset_fade: tuple[float, float, list[tuple[int, float, float]]] | None = None
         # Set once the model has loaded and reports its true canvas size (see
         # initializeGL) -- unknown before that, unlike window.py which gets
         # this from the PNG manifest up front.
         self._natural_size_px: tuple[int, int] | None = None
+        # Parameter id -> index, so the reset fade can leave alone whatever
+        # lipsync and gestures are driving this frame.
+        self._param_index: dict[str, int] = {}
 
         screen = QGuiApplication.primaryScreen()
         self._raw_device_pixel_ratio = screen.devicePixelRatio() if screen else 1.0
@@ -85,9 +142,13 @@ class Live2DWindow(QOpenGLWidget):
     def initializeGL(self) -> None:
         live2d.glInit()
         self._model = live2d.LAppModel()
-        self._model.LoadModelJson(self._model_path)
+        # Not the model as shipped: a copy whose motions have had the mouth
+        # curves removed, so lipsync keeps the mouth while a gesture plays.
+        # See live2d_motion_cache for why this is a whole patched model3.json.
+        self._model.LoadModelJson(str(lipsync_safe_model(Path(self._model_path))))
         self._model.SetAutoBlinkEnable(True)
         self._model.SetAutoBreathEnable(True)
+        self._param_index = {name: i for i, name in enumerate(self._model.GetParamIds())}
         w, h = self._model.GetCanvasSizePixel()
         self._natural_size_px = (round(w), round(h))
         # Model just loaded with the window still at its pre-load placeholder
@@ -128,31 +189,213 @@ class Live2DWindow(QOpenGLWidget):
         live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
         if self._model is None:
             return
-        open_y = VOWEL_OPEN_Y.get(self._current_vowel, 0.0)
-        self._model.SetParameterValue("ParamMouthOpenY", open_y, 1.0)
+        self._note_motion_finished()
+        self._tick_idle()
+        gesture_values = self._tick_gesture()
+        if LIPSYNC_PARAM not in gesture_values:
+            open_y = VOWEL_OPEN_Y.get(self._current_vowel, 0.0)
+            self._model.SetParameterValue(LIPSYNC_PARAM, open_y, 1.0)
+        for param, value in gesture_values.items():
+            self._model.SetParameterValue(param, value, 1.0)
+        self._tick_reset_fade(skip=gesture_values.keys())
         self._model.Update()
         self._model.Draw()
+
+    def _reset_parameters_smoothly(self, fade_seconds: float = SWITCH_FADE_SECONDS) -> None:
+        """Return to the rest pose over `fade_seconds` instead of instantly.
+
+        Cubism crossfades its own expressions, but nothing fades the raw
+        parameters a finished motion leaves behind, so clearing them with
+        ResetParameters() alone snapped the model into place. This records what
+        those parameters were, resets, and then eases from the recorded values
+        back down over the next few frames.
+        """
+        if self._model is None:
+            return
+        # The mouth is excluded outright rather than per-frame: lipsync owns it
+        # for the whole utterance, and an expression change lands right as
+        # speech starts.
+        mouth = self._param_index.get(LIPSYNC_PARAM)
+        held = []
+        for index in range(self._model.GetParameterCount()):
+            if index == mouth:
+                continue
+            parameter = self._model.GetParameter(index)
+            if abs(parameter.value - parameter.default) > 1e-3:
+                held.append((index, parameter.value, parameter.default))
+        self._model.ResetParameters()
+        self._reset_fade = (time.monotonic(), fade_seconds, held) if held else None
+
+    def _tick_reset_fade(self, skip=()) -> None:
+        """Write this frame's step of the fade started by the method above.
+
+        Anything being driven live this frame is left alone: the fade runs
+        after lipsync and gestures have written their values, so replaying a
+        recorded value over the mouth desynced it from the audio for the
+        length of the fade (2026-09-11, reported as 口が連動していない).
+        """
+        if self._model is None or self._reset_fade is None:
+            return
+        held_back = {self._param_index[name] for name in skip if name in self._param_index}
+        started, fade_seconds, held = self._reset_fade
+        elapsed = time.monotonic() - started
+        if elapsed >= fade_seconds:
+            self._reset_fade = None
+            return
+        # The value is computed here rather than passed as a blend weight:
+        # Update() writes each frame's result back, so a weight would blend
+        # against the previous frame's output and creep the wrong way.
+        remaining = 1.0 - elapsed / fade_seconds
+        for index, value, default in held:
+            if index in held_back:
+                continue
+            self._model.SetIndexParamValue(index, default + (value - default) * remaining, 1.0)
+
+    def _tick_gesture(self) -> dict[str, float]:
+        """Parameter values for the running hand-authored gesture, if any.
+
+        Auto-blink is switched off for the duration: it and the gesture both
+        write the eye-open parameters, and a blink landing mid-yawn reads as a
+        glitch rather than as breathing.
+        """
+        if self._model is None or self._gesture is None:
+            return {}
+        name, started = self._gesture
+        gesture = GESTURES[name]
+        elapsed = time.monotonic() - started
+        if elapsed >= duration(gesture):
+            self._end_gesture()
+            return {}
+        return sample(gesture, elapsed)
+
+    def _note_motion_finished(self) -> None:
+        """Clear the motion flag so idle gestures may start again.
+
+        Nothing else happens here on purpose. An earlier version reset the
+        parameters and re-applied the preset's arm pose at this point, to undo
+        the motion and land on the still picture -- but that plays as three
+        movements instead of one: the gesture runs, everything relaxes, and the
+        pose then fades in on its own. It looked like the mascot changed its
+        mind halfway through (2026-09-11, reported). A body gesture *is* the
+        pose; letting its last frame stand is the whole point of choosing
+        motions that end somewhere worth standing.
+        """
+        if self._model is None or not self._motion_active:
+            return
+        if self._model.IsMotionFinished():
+            self._motion_active = False
+
+    # -- idle ------------------------------------------------------------------
+
+    def _tick_idle(self) -> None:
+        """Let go of the expression, then gesture now and then, while idle.
+
+        Driven off the paint loop rather than its own timers: the two rules
+        both key off "time since the mascot last did anything", and one clock
+        is easier to reason about than three interacting ones.
+        """
+        if self._model is None or self._motion_active or self._gesture is not None:
+            return
+        now = time.monotonic()
+        idle_for = now - self._last_activity
+
+        if self._current_expression != "normal" and idle_for >= EXPRESSION_HOLD_SECONDS:
+            self.apply_expression("normal", fade_seconds=RELEASE_FADE_SECONDS)
+            return
+
+        if self._current_expression == "normal" and now >= self._next_idle_at:
+            # Some gestures only suit certain hours (a yawn at 3pm reads as a
+            # bug), so the pool is filtered before choosing -- and can be empty.
+            allowed = available_at(datetime.now().hour)
+            if allowed:
+                self.play_gesture(self._rng.choice(allowed))
+            self._next_idle_at = now + next_idle_delay(self._rng)
+
+    def _note_activity(self) -> None:
+        """Push back both idle behaviours; called whenever the mascot acts."""
+        self._last_activity = time.monotonic()
+        self._next_idle_at = self._last_activity + next_idle_delay(self._rng)
+
+    def play_gesture(self, name: str) -> None:
+        """Start a hand-authored gesture now, whatever the idle timer thinks."""
+        if self._model is None or name not in GESTURES:
+            return
+        gesture = GESTURES[name]
+        if touches_eyes(gesture):
+            self._model.SetAutoBlinkEnable(False)
+        if touches_breath(gesture):
+            self._model.SetAutoBreathEnable(False)
+        self._gesture = (name, time.monotonic())
+
+    def _cancel_gesture(self) -> None:
+        """Drop a running idle gesture -- speaking mid-yawn beats finishing it."""
+        self._end_gesture()
+
+    def _end_gesture(self) -> None:
+        """Clear the running gesture and hand blink/breath back to the model."""
+        if self._gesture is None:
+            return
+        self._gesture = None
+        if self._model is not None:
+            self._model.SetAutoBlinkEnable(True)
+            self._model.SetAutoBreathEnable(True)
 
     # -- Speaker-facing interface (mirrors MascotWindow) ------------------------
 
     def set_mouth_for_vowel(self, vowel: str) -> None:
         self._current_vowel = vowel
+        # Called every frame of speech, so this doubles as "still talking".
+        self._note_activity()
+        if vowel != SILENT_VOWEL:
+            self._cancel_gesture()
 
     def restore_resting_mouth(self) -> None:
         self._current_vowel = SILENT_VOWEL
 
-    def apply_expression(self, name: str) -> None:
+    def apply_expression(self, name: str, fade_seconds: float = SWITCH_FADE_SECONDS) -> None:
         """Apply a named preset: a face expression plus, usually, an arm pose.
 
         Presets are stacked with AddExpression rather than SetExpression
         because each preset is a whole picture (see live2d_expressions.py).
         An unknown name clears back to the neutral rest pose, which is also
         what "normal" (an empty preset) does.
+
+        Where the preset has a gesture (live2d_motions.py), the motion plays
+        first and the *arm pose* half of the preset is withheld until it
+        finishes -- both drive the arms, so applying them together makes the
+        gesture fight a pose that's pinning the same limbs. Face-only motions
+        don't have that problem and let the pose stay on throughout.
         """
         if self._model is None:
             return
+        self._current_expression = name if name in EXPRESSION_PRESETS else "normal"
+        self._note_activity()
+        self._cancel_gesture()
         self._model.ResetExpressions()
-        for expression_id in EXPRESSION_PRESETS.get(name, ()):
+        self._motion_active = False
+        # A finished (or stopped) motion leaves its last frame in the model's
+        # parameters -- Cubism carries them over between Update()s rather than
+        # reverting to the rest pose -- so without this the previous gesture
+        # bleeds into the next expression: after "eureka" the raised finger
+        # stayed up under "patient_wait", and "proud" kept the hip-lean's
+        # turned-away head once its motion ended (2026-09-10, reported).
+        self._model.StopAllMotions()
+        self._reset_parameters_smoothly(fade_seconds)
+        expression_ids = EXPRESSION_PRESETS.get(name, ())
+        motion = motion_for(name)
+
+        if motion is not None:
+            index, motion_name = motion
+            self._motion_active = True
+            if not is_face_only(motion_name):
+                # Faces are `exp_*`, arm poses `pose_*` -- see
+                # live2d_expressions.py for why the ids are split that way.
+                # The pose is dropped rather than played alongside: both drive
+                # the arms, and the motion is the better picture of the two.
+                expression_ids = tuple(i for i in expression_ids if not i.startswith("pose_"))
+            self._model.StartMotion(MOTION_GROUP, index, live2d.MotionPriority.FORCE)
+
+        for expression_id in expression_ids:
             self._model.AddExpression(expression_id)
 
     # -- size --------------------------------------------------------------
@@ -240,6 +483,16 @@ class Live2DWindow(QOpenGLWidget):
             action = QAction(label, self)
             action.triggered.connect(lambda _checked, n=name: self.apply_expression(n))
             expression_menu.addAction(action)
+
+        # Idle gestures fire on their own after a minute or two of quiet, which
+        # makes them awkward to look at while working on them -- this plays one
+        # on demand.
+        gesture_menu = menu.addMenu("仕草")
+        for gesture_name in GESTURES:
+            label = GESTURE_LABELS.get(gesture_name, gesture_name)
+            action = QAction(label, self)
+            action.triggered.connect(lambda _checked, g=gesture_name: self.play_gesture(g))
+            gesture_menu.addAction(action)
 
         toggle_click_through = QAction(
             "クリック透過を無効にする" if self._config.click_through else "クリック透過を有効にする",
