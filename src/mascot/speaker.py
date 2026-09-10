@@ -2,11 +2,18 @@
 
 Lives on the GUI thread. Runs one utterance at a time; when one finishes
 (or the timeline runs out) it checks the queue for the next one.
+
+The VOICEVOX round-trip is the one thing that doesn't happen here: it runs on
+a worker thread and comes back through a signal. Synthesis takes longer the
+more text there is, and doing it inline froze the mascot mid-pose for the
+duration -- the window's own paint timer can't run while the GUI thread is
+blocked on a socket (2026-09-11, reported as "一瞬立ち絵がフリーズする").
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
@@ -32,6 +39,10 @@ class Speaker(QObject):
     # Emitted when an utterance can't be spoken (VOICEVOX down etc.), so the
     # app can surface it -- otherwise the only symptom is silence.
     speech_failed = Signal(str)
+    # Internal: carries a finished synthesis back from the worker thread. Qt
+    # queues it onto the GUI thread, which is the only place the timeline,
+    # playback and window may be touched.
+    _synthesis_finished = Signal(object, object, object)
 
     def __init__(
         self,
@@ -55,6 +66,7 @@ class Speaker(QObject):
         self._speaking = False
 
         self._speech_queue.new_item.connect(self._maybe_start_next)
+        self._synthesis_finished.connect(self._on_synthesis_finished)
 
     def _maybe_start_next(self) -> None:
         if self._speaking:
@@ -68,12 +80,30 @@ class Speaker(QObject):
         text = request.text
         if request.expression is not None:
             self._window.apply_expression(request.expression)
+        # Claimed before the worker starts, so a second request arriving mid
+        # synthesis waits in the queue instead of starting a parallel one.
+        self._speaking = True
+        threading.Thread(target=self._synthesize, args=(text,), daemon=True).start()
+
+    def _synthesize(self, text: str) -> None:
+        """Worker thread: talk to VOICEVOX, hand the result back via the signal.
+
+        Nothing here may touch the window, the timeline or the timers -- the
+        signal connection is what moves the result onto the GUI thread.
+        """
         try:
             query = self._voicevox.audio_query(text, self._config.voice)
             wav_bytes = self._voicevox.synthesis(query, self._config.voice)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- reported to the user as-is
             logger.exception("VOICEVOX synthesis failed for text=%r", text)
-            self.speech_failed.emit(f"音声合成に失敗したのだ: {exc}")
+            self._synthesis_finished.emit(None, None, exc)
+            return
+        self._synthesis_finished.emit(query, wav_bytes, None)
+
+    def _on_synthesis_finished(self, query, wav_bytes, error) -> None:
+        if error is not None:
+            self._speaking = False
+            self.speech_failed.emit(f"音声合成に失敗したのだ: {error}")
             self._maybe_start_next()
             return
 
@@ -84,7 +114,6 @@ class Speaker(QObject):
 
         play_wav_async(wav_bytes)
         self._elapsed.start()
-        self._speaking = True
         self._frame_timer.start()
 
     def _on_tick(self) -> None:
