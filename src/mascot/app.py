@@ -19,6 +19,14 @@ import live2d.v3 as live2d
 
 from mascot import playback
 from mascot.assets import available_sets, load_manifest
+from mascot.companion import (
+    DEFAULT_COMPANION_PATH,
+    CompanionState,
+    days_together,
+    due_milestone,
+    load_companion_state,
+    save_companion_state,
+)
 from mascot.config import DEFAULT_CONFIG_PATH, Config, load_config, save_config
 from mascot.live2d_assets import (
     LIVE2D_PREFIX,
@@ -27,6 +35,8 @@ from mascot.live2d_assets import (
     live2d_model_path,
 )
 from mascot.live2d_window import Live2DWindow
+from mascot.proactive import WELCOME_BACK_THRESHOLD_SECONDS, pick_welcome_back
+from mascot.proactive_scheduler import ProactiveSpeechScheduler
 from mascot.server import ExclusiveHTTPServer, start_server
 from mascot.speaker import Speaker
 from mascot import reactions
@@ -56,6 +66,23 @@ def setup_logging() -> None:
 def _react_to_click(speech_queue: SpeechQueue) -> None:
     line, expression = reactions.pick(datetime.now().hour)
     speech_queue.push(line, expression=expression)
+
+
+def _greet_on_startup(speech_queue: SpeechQueue, state: CompanionState) -> None:
+    """Welcome-back takes priority over a milestone on the same launch --
+    both firing back-to-back through the queue would be mechanically fine but
+    reads as overkill for one moment (e.g. gone a week AND it's day 30)."""
+    if state.last_seen_at is not None:
+        gap = (datetime.now() - datetime.fromisoformat(state.last_seen_at)).total_seconds()
+        if gap >= WELCOME_BACK_THRESHOLD_SECONDS:
+            line, expression = pick_welcome_back()
+            speech_queue.push(line, expression=expression)
+            return
+    milestone = due_milestone(state)
+    if milestone is not None:
+        day, line, expression = milestone
+        state.celebrated_milestones.append(day)
+        speech_queue.push(line, expression=expression)
 
 
 def _tray_icon_path(window: MascotWindow | Live2DWindow, config: Config) -> str | None:
@@ -186,6 +213,20 @@ def main() -> int:
         # hook posts to -- so it waits its turn rather than talking over an
         # answer that's already being spoken.
         window.clicked.connect(lambda: _react_to_click(speech_queue))
+
+    # -- companion memory: welcome-back / milestone (once at startup) --------
+    companion_state = load_companion_state(DEFAULT_COMPANION_PATH)
+    _greet_on_startup(speech_queue, companion_state)
+    companion_state.first_seen = companion_state.first_seen or datetime.now().date().isoformat()
+    companion_state.last_seen_at = datetime.now().isoformat()
+    save_companion_state(companion_state, DEFAULT_COMPANION_PATH)
+
+    # -- proactive idle chatter (ongoing, whole-run lifetime) ----------------
+    # Kept alive via this local (no Qt parent of its own); main() doesn't
+    # return until app.exec() finishes, so the reference outlives the app.
+    proactive_scheduler = ProactiveSpeechScheduler(
+        speech_queue, lambda: days_together(companion_state)
+    )
 
     playback.cleanup_leftovers()
 

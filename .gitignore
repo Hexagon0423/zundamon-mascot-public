@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 config.json
+companion.json
 mascot.log
 logs/
 # scripts/verify_live2d_expressions.py の出力(見た目確認用、再生成できる)
