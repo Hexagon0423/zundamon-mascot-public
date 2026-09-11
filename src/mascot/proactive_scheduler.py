@@ -21,6 +21,11 @@ not just once at startup. A process that never restarts (survives a
 sleep/wake, or simply stays open for days) would otherwise never notice a new
 morning or a newly-reached milestone, since nothing else re-checks those
 while it keeps running.
+
+When idle chatter does fire, it passes along the two bits of real context it
+has for free -- the actual elapsed silence and the current date -- so
+proactive.pick_idle_chatter can occasionally use them instead of a fully
+generic line.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ class ProactiveSpeechScheduler(QObject):
         companion_check: Callable[[], bool] | None = None,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
+        now_provider: Callable[[], datetime] = datetime.now,
     ):
         super().__init__()
         self._speech_queue = speech_queue
@@ -54,6 +60,7 @@ class ProactiveSpeechScheduler(QObject):
         self._companion_check = companion_check
         self._rng = rng or random.Random()
         self._clock = clock
+        self._now_provider = now_provider
         self._last_activity = clock()
 
         # Any push -- from the Claude Code hook, a click reaction, an hourly
@@ -95,6 +102,8 @@ class ProactiveSpeechScheduler(QObject):
                 except Exception:  # noqa: BLE001 -- a broken provider shouldn't kill the timer
                     logger.exception("days_together_provider が失敗したのだ")
                     days = 0
-                line, expression = proactive.pick_idle_chatter(days, self._rng)
+                line, expression = proactive.pick_idle_chatter(
+                    days, self._rng, now=self._now_provider(), silence_seconds=silence
+                )
                 self._speech_queue.push(line, expression=expression)
         self._arm_next_check()

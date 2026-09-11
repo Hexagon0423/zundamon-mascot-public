@@ -1,5 +1,6 @@
 import random
 import time
+from datetime import datetime
 
 import pytest
 
@@ -10,6 +11,11 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from mascot import proactive  # noqa: E402
 from mascot.proactive_scheduler import ProactiveSpeechScheduler  # noqa: E402
 from mascot.speech_queue import SpeechQueue  # noqa: E402
+
+# A Tuesday: no entry in proactive.WEEKDAY_LINES, so tests using AlwaysFire
+# (which would otherwise deterministically take a weekday line whenever one
+# exists for "today") aren't at the mercy of which real day the suite runs on.
+A_WEEKDAY_WITH_NO_SPECIAL_LINES = lambda: datetime(2026, 9, 8, 14, 0, 0)  # noqa: E731
 
 
 @pytest.fixture(scope="module")
@@ -67,14 +73,21 @@ def test_does_not_fire_before_minimum_silence_elapses(app):
 def test_fires_after_the_silence_threshold_when_the_roll_succeeds(app):
     queue = SpeechQueue()
     clock = FakeClock()
-    scheduler = ProactiveSpeechScheduler(queue, lambda: 0, rng=AlwaysFire(), clock=clock)
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 0, rng=AlwaysFire(), clock=clock, now_provider=A_WEEKDAY_WITH_NO_SPECIAL_LINES
+    )
 
     clock.advance(proactive.MIN_SILENCE_SECONDS + 1)
     scheduler._on_check()
 
     request = queue.pop()
     assert request is not None
-    assert (request.text, request.expression) in proactive.IDLE_CHATTER_BY_TIER["new"]
+    # AlwaysFire's random() always beats SILENCE_TEMPLATE_PROBABILITY too, so
+    # with a real silence value always supplied by the scheduler, it lands in
+    # the duration-stating branch rather than the plain tier pool.
+    minutes = int((proactive.MIN_SILENCE_SECONDS + 1) // 60)
+    expected = {t.format(minutes=minutes) for t, _ in proactive.SILENCE_TEMPLATES_BY_TIER["new"]}
+    assert request.text in expected
 
 
 def test_never_fires_when_the_roll_fails(app):
@@ -105,14 +118,18 @@ def test_activity_resets_the_silence_clock(app):
 def test_uses_the_days_together_provider_to_pick_the_tier(app):
     queue = SpeechQueue()
     clock = FakeClock()
-    scheduler = ProactiveSpeechScheduler(queue, lambda: 50, rng=AlwaysFire(), clock=clock)
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 50, rng=AlwaysFire(), clock=clock, now_provider=A_WEEKDAY_WITH_NO_SPECIAL_LINES
+    )
 
     clock.advance(proactive.MIN_SILENCE_SECONDS + 1)
     scheduler._on_check()
 
     request = queue.pop()
     assert request is not None
-    assert (request.text, request.expression) in proactive.IDLE_CHATTER_BY_TIER["close"]
+    minutes = int((proactive.MIN_SILENCE_SECONDS + 1) // 60)
+    expected = {t.format(minutes=minutes) for t, _ in proactive.SILENCE_TEMPLATES_BY_TIER["close"]}
+    assert request.text in expected
 
 
 def test_a_broken_provider_does_not_crash_the_check(app):

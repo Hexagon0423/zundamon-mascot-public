@@ -20,11 +20,31 @@ the more casual and teasing. This is a deliberate design choice: the same
 "ひまなのだ〜"-shaped content read every day forever would feel static, and a
 relationship that never changes undercuts the whole point of tracking days
 together in the first place.
+
+Two more pieces of real (if modest) context get folded in, both mechanical --
+neither needs an LLM or any data beyond what the mascot's own process already
+has:
+
+- **How long the silence actually was.** Sometimes, instead of a generic
+  line, the mascot states the real elapsed minutes ("もう40分くらい静かな
+  のだ"). Requires the caller to pass how long it's been quiet; falls back to
+  a generic tier line if that isn't known.
+- **What day it is.** Monday and Friday (start/end of a work week) and the
+  weekend get their own occasional lines; the middle of the week doesn't,
+  since there's nothing distinct to say about a Wednesday.
+
+Explicitly out of scope for now (discussed and deferred, not forgotten):
+reading anything from the user's actual accounts (Gmail etc.) to speak about.
+That's a materially bigger feature -- it needs its own explicit consent flow,
+a decision about what's even appropriate to surface unprompted, and doesn't
+fit the "no personal data, ships in the public template too" shape everything
+else in this file has. Worth revisiting deliberately, not folding in here.
 """
 
 from __future__ import annotations
 
 import random
+from datetime import datetime
 
 # How the mascot's chatter register loosens up over time. Boundaries are
 # round numbers a person actually thinks in (a week, a month, ~3 months),
@@ -91,6 +111,55 @@ IDLE_CHATTER_BY_TIER: dict[str, tuple[tuple[str, str], ...]] = {
     ),
 }
 
+# Format strings (not plain lines): `{minutes}` is substituted with the real
+# elapsed silence, rounded down to a whole minute. Kept per-tier so stating an
+# actual duration still carries that tier's register, same as the plain lines
+# above. A length/format-validity check runs against a representative value in
+# tests, not the raw template, since "≤20 chars" only means something once
+# the placeholder is filled in.
+SILENCE_TEMPLATES_BY_TIER: dict[str, tuple[tuple[str, str], ...]] = {
+    "new": (
+        ("もう{minutes}分くらい経ったのだ", "worried"),
+        ("{minutes}分、静かに見てたのだ", "shy"),
+    ),
+    "settling_in": (
+        ("もう{minutes}分くらい静かなのだ", "patient_wait"),
+        ("{minutes}分もひまなのだ", "casual"),
+    ),
+    "close": (
+        ("もう{minutes}分放置なのだ", "skeptical"),
+        ("{minutes}分、ひとりの時間だったのだ", "casual_lean"),
+    ),
+    "old_friends": (
+        ("もう{minutes}分なのだ、薄情なのだ", "disappointed"),
+        ("{minutes}分放っておくとはいい度胸なのだ", "proud"),
+    ),
+}
+
+# How often pick_idle_chatter states the real duration instead of a generic
+# line, when it's given one to state. Not every time -- constantly narrating
+# the exact minute count would read as a countdown timer, not a character.
+SILENCE_TEMPLATE_PROBABILITY = 0.4
+
+# Occasional day-of-week flavor. Only Monday/Friday/weekend get lines: the
+# middle of the work week has nothing distinct to say, and forcing content
+# where there isn't any would be worse than just falling through to the
+# ordinary tier line (which is exactly what happens on Tue-Thu).
+WEEKDAY_LINES: dict[int, tuple[tuple[str, str], ...]] = {
+    0: (("月曜日なのだ、ぼちぼちいくのだ", "effort"),),  # Monday
+    4: (
+        ("もう金曜日なのだ、あと少しなのだ!", "delighted"),
+        ("週末が見えてきたのだ", "happy"),
+    ),  # Friday
+    5: (("土曜日なのだ、休むのも仕事なのだ", "relieved"),),  # Saturday
+    6: (("日曜日なのだ、のんびりするのだ", "casual"),),  # Sunday
+}
+
+# Checked before the silence template and before the plain tier line -- a
+# "it's Friday" observation is worth surfacing more readily than a duration
+# callout, since it's rarer (fires on 4 of 7 days at most, once per check).
+WEEKDAY_LINE_PROBABILITY = 0.3
+
 # Fired once per app run when it's been a long time since the process was
 # last ticking (see companion.py's last_seen_at) -- independent of the
 # familiarity tier, since "I missed you" reads the same at any relationship
@@ -144,9 +213,34 @@ FIRE_PROBABILITY = 0.35
 WELCOME_BACK_THRESHOLD_SECONDS = 4 * 60 * 60
 
 
-def pick_idle_chatter(days_together: int, rng: random.Random | None = None) -> tuple[str, str]:
+def pick_idle_chatter(
+    days_together: int,
+    rng: random.Random | None = None,
+    *,
+    now: datetime | None = None,
+    silence_seconds: float | None = None,
+) -> tuple[str, str]:
+    """A line to speak while idle.
+
+    `now` and `silence_seconds` are both optional context, not required
+    inputs -- omitting either just means that flavor of line can't be picked
+    this time, falling back to a plain tier line. Priority when more than one
+    could apply: weekday flavor first (rarer, so worth surfacing when it's
+    there), then a stated duration, then the ordinary tier line.
+    """
+    rng = rng or random
     tier = familiarity_tier(days_together)
-    return (rng or random).choice(IDLE_CHATTER_BY_TIER[tier])
+
+    weekday_lines = WEEKDAY_LINES.get((now or datetime.now()).weekday())
+    if weekday_lines and rng.random() < WEEKDAY_LINE_PROBABILITY:
+        return rng.choice(weekday_lines)
+
+    if silence_seconds is not None and rng.random() < SILENCE_TEMPLATE_PROBABILITY:
+        minutes = max(1, int(silence_seconds // 60))
+        template, expression = rng.choice(SILENCE_TEMPLATES_BY_TIER[tier])
+        return template.format(minutes=minutes), expression
+
+    return rng.choice(IDLE_CHATTER_BY_TIER[tier])
 
 
 def pick_welcome_back(rng: random.Random | None = None) -> tuple[str, str]:
