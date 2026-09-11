@@ -7,10 +7,12 @@ from mascot.companion import (
     MILESTONES,
     days_together,
     due_milestone,
-    is_new_calendar_day,
     load_companion_state,
     save_companion_state,
+    seconds_since_last_seen,
+    should_greet_morning,
 )
+from mascot.proactive import MORNING_GREETING_HOURS
 from mascot.window import EXPRESSION_PRESETS
 
 
@@ -37,7 +39,10 @@ def test_load_file_with_wrong_shape_falls_back_to_defaults(tmp_path):
 def test_save_then_load_round_trips(tmp_path):
     path = tmp_path / "companion.json"
     original = CompanionState(
-        first_seen="2026-09-11", last_seen_at="2026-09-11T10:00:00", celebrated_milestones=[1, 7]
+        first_seen="2026-09-11",
+        last_seen_at="2026-09-11T10:00:00",
+        last_morning_greeted_on="2026-09-11",
+        celebrated_milestones=[1, 7],
     )
     save_companion_state(original, path)
     loaded = load_companion_state(path)
@@ -58,20 +63,38 @@ def test_days_together_is_zero_with_no_first_seen():
     assert days_together(CompanionState()) == 0
 
 
-def test_is_new_calendar_day_true_when_the_date_has_advanced():
-    state = CompanionState(last_seen_at="2026-09-10T22:00:00")
-    assert is_new_calendar_day(state, datetime(2026, 9, 11, 7, 0, 0)) is True
+def test_seconds_since_last_seen_is_none_on_the_first_run():
+    assert seconds_since_last_seen(CompanionState()) is None
 
 
-def test_is_new_calendar_day_false_within_the_same_day():
-    state = CompanionState(last_seen_at="2026-09-11T06:00:00")
-    assert is_new_calendar_day(state, datetime(2026, 9, 11, 8, 0, 0)) is False
+def test_seconds_since_last_seen_measures_the_gap():
+    state = CompanionState(last_seen_at="2026-09-11T10:00:00")
+    gap = seconds_since_last_seen(state, datetime(2026, 9, 11, 12, 0, 0))
+    assert gap == pytest.approx(2 * 60 * 60)
 
 
-def test_is_new_calendar_day_false_with_no_previous_visit():
-    """No prior day to have crossed from -- the very first run is handled
-    separately (it gets no greeting, first_seen is just recorded)."""
-    assert is_new_calendar_day(CompanionState(), datetime(2026, 9, 11, 7, 0, 0)) is False
+@pytest.mark.parametrize("hour", sorted(MORNING_GREETING_HOURS))
+def test_should_greet_morning_true_on_first_run_during_morning_hours(hour):
+    """No prior greeting recorded yet -- still fires, so a first-ever launch
+    that happens to be in the morning gets a proper "おはよう"."""
+    assert should_greet_morning(CompanionState(), datetime(2026, 9, 11, hour, 0, 0)) is True
+
+
+def test_should_greet_morning_false_outside_morning_hours():
+    assert should_greet_morning(CompanionState(), datetime(2026, 9, 11, 14, 0, 0)) is False
+
+
+def test_should_greet_morning_false_if_already_greeted_today():
+    state = CompanionState(last_morning_greeted_on="2026-09-11")
+    assert should_greet_morning(state, datetime(2026, 9, 11, 8, 0, 0)) is False
+
+
+def test_should_greet_morning_true_again_the_next_morning():
+    """The key fix: this must not depend on the process having restarted --
+    a continuously running mascot has to notice the new day on its own via
+    the periodic scheduler tick, not just at process launch."""
+    state = CompanionState(last_morning_greeted_on="2026-09-10")
+    assert should_greet_morning(state, datetime(2026, 9, 11, 8, 0, 0)) is True
 
 
 def test_milestones_use_real_expressions():

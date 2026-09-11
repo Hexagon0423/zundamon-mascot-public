@@ -127,3 +127,67 @@ def test_a_broken_provider_does_not_crash_the_check(app):
     scheduler._on_check()  # must not raise
 
     assert queue.pop() is not None  # still speaks, just falls back to days=0
+
+
+def test_companion_check_runs_every_tick_not_just_once():
+    """The whole point: a process that never restarts must keep noticing a
+    new morning / milestone / long gap on its own, not just at launch."""
+    queue = SpeechQueue()
+    clock = FakeClock()
+    calls = []
+
+    def companion_check():
+        calls.append(1)
+        return False
+
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 0, companion_check=companion_check, rng=NeverFire(), clock=clock
+    )
+    scheduler._on_check()
+    scheduler._on_check()
+    scheduler._on_check()
+    assert len(calls) == 3
+
+
+def test_companion_check_firing_skips_the_idle_chatter_roll_this_tick(app):
+    """The two must not stack in one moment: if the companion check already
+    spoke (e.g. a morning greeting), idle chatter should wait its turn."""
+    queue = SpeechQueue()
+    clock = FakeClock()
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 0, companion_check=lambda: True, rng=AlwaysFire(), clock=clock
+    )
+
+    clock.advance(proactive.MIN_SILENCE_SECONDS + 1)
+    scheduler._on_check()
+
+    assert queue.pop() is None  # the companion check is responsible for its own push
+
+
+def test_companion_check_not_firing_still_allows_idle_chatter(app):
+    queue = SpeechQueue()
+    clock = FakeClock()
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 0, companion_check=lambda: False, rng=AlwaysFire(), clock=clock
+    )
+
+    clock.advance(proactive.MIN_SILENCE_SECONDS + 1)
+    scheduler._on_check()
+
+    assert queue.pop() is not None
+
+
+def test_a_broken_companion_check_does_not_crash_and_idle_chatter_still_runs(app):
+    def broken():
+        raise RuntimeError("disk unavailable")
+
+    queue = SpeechQueue()
+    clock = FakeClock()
+    scheduler = ProactiveSpeechScheduler(
+        queue, lambda: 0, companion_check=broken, rng=AlwaysFire(), clock=clock
+    )
+
+    clock.advance(proactive.MIN_SILENCE_SECONDS + 1)
+    scheduler._on_check()  # must not raise
+
+    assert queue.pop() is not None  # falls through to idle chatter

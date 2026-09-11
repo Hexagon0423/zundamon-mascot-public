@@ -14,6 +14,13 @@ almost never coincides with the idle check firing -- the utterance itself
 just reset the silence clock via new_item, so MIN_SILENCE_SECONDS won't have
 elapsed. In the rare case it does coincide, it just queues and waits, no
 observable bug.
+
+Also drives the companion/relationship check (morning greeting, welcome-back,
+milestones -- see app.py's `_companion_check`) on the same recurring timer,
+not just once at startup. A process that never restarts (survives a
+sleep/wake, or simply stays open for days) would otherwise never notice a new
+morning or a newly-reached milestone, since nothing else re-checks those
+while it keeps running.
 """
 
 from __future__ import annotations
@@ -37,12 +44,14 @@ class ProactiveSpeechScheduler(QObject):
         self,
         speech_queue: SpeechQueue,
         days_together_provider: Callable[[], int],
+        companion_check: Callable[[], bool] | None = None,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         super().__init__()
         self._speech_queue = speech_queue
         self._days_together_provider = days_together_provider
+        self._companion_check = companion_check
         self._rng = rng or random.Random()
         self._clock = clock
         self._last_activity = clock()
@@ -66,13 +75,26 @@ class ProactiveSpeechScheduler(QObject):
         self._timer.start(int(proactive.next_check_delay(self._rng) * 1000))
 
     def _on_check(self) -> None:
-        silence = self._clock() - self._last_activity
-        if silence >= proactive.MIN_SILENCE_SECONDS and proactive.should_fire(self._rng):
+        # The companion check (morning / welcome-back / milestone) runs every
+        # tick, not just at startup -- a process that never restarts (survives
+        # a sleep/wake, or just stays open for days) would otherwise never
+        # notice any of those. It takes priority: if it spoke, the idle-chatter
+        # roll for this tick is skipped, so the two don't stack in one moment.
+        companion_fired = False
+        if self._companion_check is not None:
             try:
-                days = self._days_together_provider()
-            except Exception:  # noqa: BLE001 -- a broken provider shouldn't kill the timer
-                logger.exception("days_together_provider が失敗したのだ")
-                days = 0
-            line, expression = proactive.pick_idle_chatter(days, self._rng)
-            self._speech_queue.push(line, expression=expression)
+                companion_fired = self._companion_check()
+            except Exception:  # noqa: BLE001 -- a broken check shouldn't kill the timer
+                logger.exception("companion_check が失敗したのだ")
+
+        if not companion_fired:
+            silence = self._clock() - self._last_activity
+            if silence >= proactive.MIN_SILENCE_SECONDS and proactive.should_fire(self._rng):
+                try:
+                    days = self._days_together_provider()
+                except Exception:  # noqa: BLE001 -- a broken provider shouldn't kill the timer
+                    logger.exception("days_together_provider が失敗したのだ")
+                    days = 0
+                line, expression = proactive.pick_idle_chatter(days, self._rng)
+                self._speech_queue.push(line, expression=expression)
         self._arm_next_check()

@@ -24,9 +24,10 @@ from mascot.companion import (
     CompanionState,
     days_together,
     due_milestone,
-    is_new_calendar_day,
     load_companion_state,
     save_companion_state,
+    seconds_since_last_seen,
+    should_greet_morning,
 )
 from mascot.config import DEFAULT_CONFIG_PATH, Config, load_config, save_config
 from mascot.live2d_assets import (
@@ -36,12 +37,7 @@ from mascot.live2d_assets import (
     live2d_model_path,
 )
 from mascot.live2d_window import Live2DWindow
-from mascot.proactive import (
-    MORNING_GREETING_HOURS,
-    WELCOME_BACK_THRESHOLD_SECONDS,
-    pick_morning_greeting,
-    pick_welcome_back,
-)
+from mascot.proactive import WELCOME_BACK_THRESHOLD_SECONDS, pick_morning_greeting, pick_welcome_back
 from mascot.proactive_scheduler import ProactiveSpeechScheduler
 from mascot.server import ExclusiveHTTPServer, start_server
 from mascot.speaker import Speaker
@@ -74,35 +70,57 @@ def _react_to_click(speech_queue: SpeechQueue) -> None:
     speech_queue.push(line, expression=expression)
 
 
-def _greet_on_startup(speech_queue: SpeechQueue, state: CompanionState) -> None:
+def _companion_check(speech_queue: SpeechQueue, state: CompanionState, path: Path) -> bool:
     """Priority: morning greeting > welcome-back > milestone. Only one fires
-    per launch -- stacking any two through the queue would be mechanically
-    fine but reads as overkill for one moment (e.g. gone a week AND it's day 30).
+    per call -- stacking any two through the queue would be mechanically fine
+    but reads as overkill for one moment (e.g. gone a week AND it's day 30).
+    A milestone or welcome-back that loses this way isn't lost, just delayed
+    to the next call (see due_milestone's own "don't stack" contract).
+
+    Runs at startup *and* on every proactive-scheduler tick thereafter (see
+    proactive_scheduler.py's `companion_check` hook) -- not startup-only.
+    A process that survives a sleep/wake or just runs for days without
+    restarting would otherwise never notice a new morning, a return from a
+    long gap, or a newly-reached milestone, since nothing else re-checks
+    these while it keeps running (2026-09-11, reported).
 
     Morning greeting comes first deliberately: a routine "PC off overnight,
     back on the next morning" gap is often several hours, easily past
     WELCOME_BACK_THRESHOLD_SECONDS -- without this check, every single morning
     would say "ひさしぶりなのだ", which cheapens the phrase for when it's
-    actually earned (a real multi-day absence). Crossing into a new calendar
-    day during morning hours is a better signal for "good morning" than raw
-    elapsed time is.
+    actually earned (a real multi-day absence).
+
+    `state.last_seen_at` is the heartbeat this gap-detection relies on: it's
+    wall-clock (not the scheduler's monotonic silence clock, which can behave
+    inconsistently across a suspend), and it's updated here on every call --
+    so a sleep/wake shows up as a jump between two ticks, not just between
+    two process launches.
     """
     now = datetime.now()
-    if is_new_calendar_day(state, now) and now.hour in MORNING_GREETING_HOURS:
+    fired = False
+    if should_greet_morning(state, now):
         line, expression = pick_morning_greeting()
         speech_queue.push(line, expression=expression)
-        return
-    if state.last_seen_at is not None:
-        gap = (now - datetime.fromisoformat(state.last_seen_at)).total_seconds()
-        if gap >= WELCOME_BACK_THRESHOLD_SECONDS:
+        state.last_morning_greeted_on = now.date().isoformat()
+        fired = True
+    else:
+        gap = seconds_since_last_seen(state, now)
+        if gap is not None and gap >= WELCOME_BACK_THRESHOLD_SECONDS:
             line, expression = pick_welcome_back()
             speech_queue.push(line, expression=expression)
-            return
-    milestone = due_milestone(state)
-    if milestone is not None:
-        day, line, expression = milestone
-        state.celebrated_milestones.append(day)
-        speech_queue.push(line, expression=expression)
+            fired = True
+        else:
+            milestone = due_milestone(state, now.date())
+            if milestone is not None:
+                day, line, expression = milestone
+                state.celebrated_milestones.append(day)
+                speech_queue.push(line, expression=expression)
+                fired = True
+
+    state.first_seen = state.first_seen or now.date().isoformat()
+    state.last_seen_at = now.isoformat()
+    save_companion_state(state, path)
+    return fired
 
 
 def _tray_icon_path(window: MascotWindow | Live2DWindow, config: Config) -> str | None:
@@ -234,18 +252,21 @@ def main() -> int:
         # answer that's already being spoken.
         window.clicked.connect(lambda: _react_to_click(speech_queue))
 
-    # -- companion memory: welcome-back / milestone (once at startup) --------
+    # -- companion memory: morning / welcome-back / milestone ---------------
+    # Checked once now, then again on every scheduler tick below -- see
+    # _companion_check's docstring for why startup-only isn't enough.
     companion_state = load_companion_state(DEFAULT_COMPANION_PATH)
-    _greet_on_startup(speech_queue, companion_state)
-    companion_state.first_seen = companion_state.first_seen or datetime.now().date().isoformat()
-    companion_state.last_seen_at = datetime.now().isoformat()
-    save_companion_state(companion_state, DEFAULT_COMPANION_PATH)
+    _companion_check(speech_queue, companion_state, DEFAULT_COMPANION_PATH)
 
     # -- proactive idle chatter (ongoing, whole-run lifetime) ----------------
     # Kept alive via this local (no Qt parent of its own); main() doesn't
     # return until app.exec() finishes, so the reference outlives the app.
     proactive_scheduler = ProactiveSpeechScheduler(
-        speech_queue, lambda: days_together(companion_state)
+        speech_queue,
+        lambda: days_together(companion_state),
+        companion_check=lambda: _companion_check(
+            speech_queue, companion_state, DEFAULT_COMPANION_PATH
+        ),
     )
 
     playback.cleanup_leftovers()
