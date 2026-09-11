@@ -52,3 +52,23 @@ def test_pick_returns_a_pair_suitable_for_the_hour():
 def test_there_is_enough_variety_to_not_repeat_obviously():
     assert len(reactions.REACTIONS) >= 20
     assert len({expression for _, expression in reactions.REACTIONS}) >= 10
+
+
+def test_time_bound_lines_are_picked_close_to_their_boosted_rate():
+    """A uniform choice over the merged pool would give the morning/night
+    lines only ~12-15% (a handful among dozens of anytime lines) -- this is
+    deliberately boosted to TIME_BOUND_PROBABILITY so it reads as the mascot
+    noticing the time of day, not a rare easter egg."""
+    rng = random.Random(0)
+    morning = set(reactions.MORNING_ONLY)
+    trials = 2000
+    hits = sum(1 for _ in range(trials) if reactions.pick(8, rng) in morning)
+    rate = hits / trials
+    assert abs(rate - reactions.TIME_BOUND_PROBABILITY) < 0.05, rate
+
+
+def test_ordinary_hours_never_pick_a_time_bound_line():
+    rng = random.Random(0)
+    off_limits = set(reactions.MORNING_ONLY) | set(reactions.NIGHT_ONLY)
+    for _ in range(500):
+        assert reactions.pick(14, rng) not in off_limits
