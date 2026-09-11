@@ -1,4 +1,6 @@
-# VOICEVOX を起動し、ウィンドウが出たら最小化する。
+﻿# VOICEVOX を起動し、ウィンドウが出たら最小化する。
+# UTF-8 BOM付きで保存すること(Windows PowerShell 5.1はBOM無しをShift-JISとして読み、
+# 日本語コメントが次の行を飲み込む)。
 # Electron はショートカットの「最小化」指定を無視するので、出てきた窓を後から畳む。
 $ErrorActionPreference = 'Stop'
 
