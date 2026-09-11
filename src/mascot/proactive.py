@@ -102,6 +102,25 @@ WELCOME_BACK: tuple[tuple[str, str], ...] = (
     ("やっと会えたのだ", "relieved"),
 )
 
+# Fired instead of WELCOME_BACK when the gap crossing into a new calendar day
+# also happens to land in the morning -- a normal "turned the PC off overnight,
+# turned it back on" cycle is not a "long time no see," and greeting the most
+# routine gap of all with "ひさしぶり" every single morning would cheapen the
+# phrase for when it's actually earned (a real multi-day absence). Checked
+# separately from WELCOME_BACK_THRESHOLD_SECONDS on purpose: this can fire even
+# on a short gap (e.g. restarted the app right after waking the PC) as long as
+# it's the first time today and it's morning.
+MORNING_GREETING_HOURS = frozenset({5, 6, 7, 8, 9, 10})
+
+MORNING_GREETING: tuple[tuple[str, str], ...] = (
+    ("おはようなのだ!", "greeting"),
+    ("今日も一日がんばるのだ!", "effort"),
+    ("よく眠れたのだ?", "worried"),
+    ("今日も元気にいくのだ!", "delighted"),
+    ("朝から動いてえらいのだ!", "proud"),
+    ("今日はどんな一日になるのだ?", "thinking"),
+)
+
 # Below this, the idle-chatter check never fires -- a hard floor, not just a
 # low probability, so a typo in the probability constant can't turn this into
 # a near-metronome (the failure mode this project has rejected three times
@@ -132,6 +151,10 @@ def pick_idle_chatter(days_together: int, rng: random.Random | None = None) -> t
 
 def pick_welcome_back(rng: random.Random | None = None) -> tuple[str, str]:
     return (rng or random).choice(WELCOME_BACK)
+
+
+def pick_morning_greeting(rng: random.Random | None = None) -> tuple[str, str]:
+    return (rng or random).choice(MORNING_GREETING)
 
 
 def next_check_delay(rng: random.Random | None = None) -> float:

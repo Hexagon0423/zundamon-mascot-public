@@ -8,7 +8,7 @@ from mascot.window import EXPRESSION_PRESETS
 ALL_TIER_LINES = [
     line for pool in proactive.IDLE_CHATTER_BY_TIER.values() for line in pool
 ]
-ALL_LINES = ALL_TIER_LINES + list(proactive.WELCOME_BACK)
+ALL_LINES = ALL_TIER_LINES + list(proactive.WELCOME_BACK) + list(proactive.MORNING_GREETING)
 
 
 def test_every_line_uses_a_real_expression():
@@ -42,6 +42,22 @@ def test_each_tier_has_enough_variety(tier):
 def test_welcome_back_has_no_duplicate_lines():
     lines = [line for line, _ in proactive.WELCOME_BACK]
     assert len(lines) == len(set(lines))
+
+
+def test_morning_greeting_has_no_duplicate_lines():
+    lines = [line for line, _ in proactive.MORNING_GREETING]
+    assert len(lines) == len(set(lines))
+
+
+def test_morning_greeting_hours_are_actually_morning():
+    """Sanity bound: a misconfigured range here would fire "おはよう" at
+    an hour that clearly isn't morning."""
+    assert proactive.MORNING_GREETING_HOURS <= set(range(4, 12))
+
+
+def test_pick_morning_greeting_returns_a_pair_from_the_table():
+    rng = random.Random(0)
+    assert proactive.pick_morning_greeting(rng) in proactive.MORNING_GREETING
 
 
 @pytest.mark.parametrize(

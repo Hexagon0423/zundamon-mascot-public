@@ -24,6 +24,7 @@ from mascot.companion import (
     CompanionState,
     days_together,
     due_milestone,
+    is_new_calendar_day,
     load_companion_state,
     save_companion_state,
 )
@@ -35,7 +36,12 @@ from mascot.live2d_assets import (
     live2d_model_path,
 )
 from mascot.live2d_window import Live2DWindow
-from mascot.proactive import WELCOME_BACK_THRESHOLD_SECONDS, pick_welcome_back
+from mascot.proactive import (
+    MORNING_GREETING_HOURS,
+    WELCOME_BACK_THRESHOLD_SECONDS,
+    pick_morning_greeting,
+    pick_welcome_back,
+)
 from mascot.proactive_scheduler import ProactiveSpeechScheduler
 from mascot.server import ExclusiveHTTPServer, start_server
 from mascot.speaker import Speaker
@@ -69,11 +75,25 @@ def _react_to_click(speech_queue: SpeechQueue) -> None:
 
 
 def _greet_on_startup(speech_queue: SpeechQueue, state: CompanionState) -> None:
-    """Welcome-back takes priority over a milestone on the same launch --
-    both firing back-to-back through the queue would be mechanically fine but
-    reads as overkill for one moment (e.g. gone a week AND it's day 30)."""
+    """Priority: morning greeting > welcome-back > milestone. Only one fires
+    per launch -- stacking any two through the queue would be mechanically
+    fine but reads as overkill for one moment (e.g. gone a week AND it's day 30).
+
+    Morning greeting comes first deliberately: a routine "PC off overnight,
+    back on the next morning" gap is often several hours, easily past
+    WELCOME_BACK_THRESHOLD_SECONDS -- without this check, every single morning
+    would say "ひさしぶりなのだ", which cheapens the phrase for when it's
+    actually earned (a real multi-day absence). Crossing into a new calendar
+    day during morning hours is a better signal for "good morning" than raw
+    elapsed time is.
+    """
+    now = datetime.now()
+    if is_new_calendar_day(state, now) and now.hour in MORNING_GREETING_HOURS:
+        line, expression = pick_morning_greeting()
+        speech_queue.push(line, expression=expression)
+        return
     if state.last_seen_at is not None:
-        gap = (datetime.now() - datetime.fromisoformat(state.last_seen_at)).total_seconds()
+        gap = (now - datetime.fromisoformat(state.last_seen_at)).total_seconds()
         if gap >= WELCOME_BACK_THRESHOLD_SECONDS:
             line, expression = pick_welcome_back()
             speech_queue.push(line, expression=expression)

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,21 @@ def load_companion_state(path: Path = DEFAULT_COMPANION_PATH) -> CompanionState:
 
 def save_companion_state(state: CompanionState, path: Path = DEFAULT_COMPANION_PATH) -> None:
     path.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def is_new_calendar_day(state: CompanionState, now: datetime | None = None) -> bool:
+    """True the first time this is checked on a given calendar day.
+
+    Used to tell a routine overnight gap (PC off, back on the next morning)
+    apart from a real absence: both can be several hours, but only one of
+    them crosses into a new day. `state.last_seen_at` being None (never run
+    before) is not "a new day" -- there's no previous day to have crossed
+    from, and the very-first-run case is handled separately.
+    """
+    if state.last_seen_at is None:
+        return False
+    last = datetime.fromisoformat(state.last_seen_at)
+    return last.date() < (now or datetime.now()).date()
 
 
 def days_together(state: CompanionState, today: date | None = None) -> int:

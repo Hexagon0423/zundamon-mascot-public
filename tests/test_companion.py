@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -7,6 +7,7 @@ from mascot.companion import (
     MILESTONES,
     days_together,
     due_milestone,
+    is_new_calendar_day,
     load_companion_state,
     save_companion_state,
 )
@@ -55,6 +56,22 @@ def test_days_together_is_zero_on_the_first_day():
 
 def test_days_together_is_zero_with_no_first_seen():
     assert days_together(CompanionState()) == 0
+
+
+def test_is_new_calendar_day_true_when_the_date_has_advanced():
+    state = CompanionState(last_seen_at="2026-09-10T22:00:00")
+    assert is_new_calendar_day(state, datetime(2026, 9, 11, 7, 0, 0)) is True
+
+
+def test_is_new_calendar_day_false_within_the_same_day():
+    state = CompanionState(last_seen_at="2026-09-11T06:00:00")
+    assert is_new_calendar_day(state, datetime(2026, 9, 11, 8, 0, 0)) is False
+
+
+def test_is_new_calendar_day_false_with_no_previous_visit():
+    """No prior day to have crossed from -- the very first run is handled
+    separately (it gets no greeting, first_seen is just recorded)."""
+    assert is_new_calendar_day(CompanionState(), datetime(2026, 9, 11, 7, 0, 0)) is False
 
 
 def test_milestones_use_real_expressions():
